@@ -1,0 +1,25 @@
+#!/bin/sh
+# ubuclaw-launch — wrapper that ensures openclaw finds its bundled Chromium
+# and stores all data inside the snap's private user directory.
+
+# Redirect XDG dirs so any XDG-aware code also stays confined.
+export XDG_CONFIG_HOME="$SNAP_USER_COMMON/.config"
+export XDG_DATA_HOME="$SNAP_USER_COMMON/.local/share"
+export XDG_CACHE_HOME="$SNAP_USER_COMMON/.cache"
+
+# Tell Playwright where the pre-installed Chromium lives.
+export PLAYWRIGHT_BROWSERS_PATH="$SNAP/usr/share/ms-playwright"
+
+# Make sure the workspace directory exists on first run.
+mkdir -p "$SNAP_USER_COMMON/workspace"
+
+# Locate openclaw.mjs regardless of whether npm hoisted it or kept it nested.
+OPENCLAW_MJS=$(find "$SNAP/lib/node_modules" \
+  -name "openclaw.mjs" -path "*/openclaw/openclaw.mjs" | head -1)
+
+if [ -z "$OPENCLAW_MJS" ]; then
+  echo "ubuclaw: cannot locate openclaw.mjs under $SNAP/lib/node_modules" >&2
+  exit 1
+fi
+
+exec "$SNAP/bin/node" "$OPENCLAW_MJS" "$@"

@@ -1,0 +1,135 @@
+name: ubuclaw
+base: core24
+adopt-info: openclaw
+summary: Local-first personal AI assistant (OpenClaw, Ubuntu edition)
+description: |
+  UbuClaw is the Ubuntu snap of OpenClaw — a local-first AI assistant that
+  runs entirely on your machine. It connects to your chosen AI model and
+  reaches the outside world through chat interfaces (Discord, Telegram, Slack,
+  web UI, and more), performing agentic tasks such as web browsing, file
+  operations, code execution, and scheduled jobs.
+
+  Configuration, memory, and workspace data are stored privately in
+  ~/snap/ubuclaw/current/. Files you want the agent to work with should live
+  in your home directory (non-hidden folders); grant access via the built-in
+  workspace configuration.
+
+  Requires a valid API key for your chosen LLM provider. Run the onboarding
+  wizard on first launch: ubuclaw onboard
+
+grade: stable
+confinement: strict
+
+apps:
+  # Interactive CLI — onboarding wizard, config editing, status checks, etc.
+  # Run as: ubuclaw <command>
+  ubuclaw:
+    command: bin/ubuclaw-launch
+    environment:
+      HOME: $SNAP_USER_COMMON
+      PLAYWRIGHT_BROWSERS_PATH: $SNAP/usr/share/ms-playwright
+      OPENCLAW_LOG_LEVEL: error
+    plugs:
+      - home
+      - network
+      - network-bind
+      - browser-support
+
+  # Persistent gateway service — managed by snapd/systemd.
+  # Enable:  snap start --enable ubuclaw.service
+  # Disable: snap stop  --disable ubuclaw.service
+  # On first start auto-configures a local Lemonade instance if detected.
+  service:
+    command: bin/ubuclaw-daemon-launch
+    environment:
+      OPENCLAW_LOG_LEVEL: error
+      HOME: $SNAP_USER_COMMON
+    daemon: simple
+    daemon-scope: user   # run as a systemd user unit, not root, so $SNAP_USER_COMMON
+                         # and our HOME=$SNAP_USER_COMMON override resolve identically
+                         # for both this daemon and the 'ubuclaw' CLI app — they share
+                         # the same openclaw.json without any root/user path mismatch.
+    restart-condition: on-failure
+    restart-delay: 10s
+    plugs:
+      - home
+      - network
+      - network-bind
+      - browser-support
+
+# Allow the bundled Chromium to use kernel user namespaces for its own
+# internal sandbox (avoids the less-secure --no-sandbox flag).
+plugs:
+  browser-support:
+    allow-sandbox: true
+
+parts:
+  launcher:
+    plugin: dump
+    source: snap/local
+    organize:
+      bin/ubuclaw-launch: bin/ubuclaw-launch
+      bin/ubuclaw-daemon-launch: bin/ubuclaw-daemon-launch
+      bin/setup-providers.js: bin/setup-providers.js
+      bin/systemctl: bin/systemctl
+
+  openclaw:
+    plugin: npm
+    source: .
+    npm-include-node: true
+    npm-node-version: '22.16.0'
+    override-build: |
+      craftctl default
+      # Re-install openclaw directly as a top-level global package so it always
+      # lands at lib/node_modules/openclaw/ regardless of npm's hoisting choices
+      # when it was a transitive dependency of our local ubuclaw wrapper.
+      "$CRAFT_PART_INSTALL/bin/npm" install -g \
+        --prefix "$CRAFT_PART_INSTALL" \
+        openclaw
+      # Derive snap version from the now-installed openclaw package.json.
+      # Done here (not override-pull) because Node.js is only available after
+      # the npm plugin sets up the build environment.
+      craftctl set version="$("$CRAFT_PART_INSTALL/bin/node" -e \
+        "console.log(require('$CRAFT_PART_INSTALL/lib/node_modules/openclaw/package.json').version)")"
+      # openclaw depends on playwright-core (no CLI).  Install the matching
+      # full playwright package so we get the browser-installer CLI, then use
+      # it to bake the pinned Chromium revision into the snap at build time.
+      export PLAYWRIGHT_BROWSERS_PATH="$CRAFT_PART_INSTALL/usr/share/ms-playwright"
+      mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
+      PLAYWRIGHT_CORE_PKG=$(find "$CRAFT_PART_INSTALL/lib/node_modules" \
+        -name "package.json" -path "*/playwright-core/package.json" | head -1)
+      PLAYWRIGHT_VERSION=$("$CRAFT_PART_INSTALL/bin/node" -e \
+        "console.log(require('${PLAYWRIGHT_CORE_PKG}').version)")
+      "$CRAFT_PART_INSTALL/bin/npm" install -g \
+        --prefix "$CRAFT_PART_BUILD/playwright-cli" \
+        "playwright@${PLAYWRIGHT_VERSION}"
+      "$CRAFT_PART_BUILD/playwright-cli/bin/playwright" install chromium
+    build-packages:
+      - git
+      - python3
+      - gcc
+      - g++
+      - make
+    stage-packages:
+      # Runtime libraries required by Playwright's bundled Chromium on Noble.
+      - libnss3
+      - libnspr4
+      - libatk1.0-0t64
+      - libatk-bridge2.0-0t64
+      - libcups2t64
+      - libdrm2
+      - libdbus-1-3
+      - libxkbcommon0
+      - libatspi2.0-0t64
+      - libx11-6
+      - libxcomposite1
+      - libxdamage1
+      - libxext6
+      - libxfixes3
+      - libxrandr2
+      - libgbm1
+      - libpango-1.0-0
+      - libcairo2
+      - libasound2t64
+      # dbus-send — used by the bundled systemctl shim to manage systemd user units
+      - dbus-bin

@@ -1,0 +1,8 @@
+{
+  "name": "ubuclaw",
+  "version": "2026.3.13",
+  "private": true,
+  "dependencies": {
+    "openclaw": "latest"
+  }
+}

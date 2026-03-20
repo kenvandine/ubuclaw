@@ -1,0 +1,45 @@
+#!/bin/sh
+# ubuclaw-daemon-launch — persistent gateway service.
+#
+# On first start (no config file present) it probes for a local Lemonade
+# instance and, if found, writes a minimal openclaw.json so the gateway has
+# a working LLM provider without any manual configuration.  If Lemonade
+# is absent the gateway still starts cleanly with OpenClaw's safe defaults;
+# run 'ubuclaw onboard' at any time to complete setup.
+
+export HOME="$SNAP_USER_COMMON"
+export XDG_CONFIG_HOME="$SNAP_USER_COMMON/.config"
+export XDG_DATA_HOME="$SNAP_USER_COMMON/.local/share"
+export XDG_CACHE_HOME="$SNAP_USER_COMMON/.cache"
+export PLAYWRIGHT_BROWSERS_PATH="$SNAP/usr/share/ms-playwright"
+
+mkdir -p "$SNAP_USER_COMMON/workspace"
+
+OPENCLAW_MJS=$(find "$SNAP/lib/node_modules" \
+  -name "openclaw.mjs" -path "*/openclaw/openclaw.mjs" | head -1)
+
+if [ -z "$OPENCLAW_MJS" ]; then
+  echo "ubuclaw: cannot locate openclaw.mjs under $SNAP/lib/node_modules" >&2
+  exit 1
+fi
+
+CONFIG_FILE="$SNAP_USER_COMMON/.openclaw/openclaw.json"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+  if "$SNAP/bin/node" "$SNAP/bin/setup-providers.js"; then
+    echo "ubuclaw: provider config written to $CONFIG_FILE"
+  else
+    echo "ubuclaw: lemonade not detected; starting with safe defaults"
+    echo "ubuclaw: run 'ubuclaw onboard' to configure an LLM provider"
+  fi
+  # Bootstrap device identity, credential store, and gateway token so the
+  # CLI can connect immediately without a separate 'ubuclaw setup' step.
+  # --accept-risk is required for non-interactive mode; the snap's strict
+  # confinement (AppArmor + seccomp + no root) provides the acknowledged safety.
+  "$SNAP/bin/node" "$OPENCLAW_MJS" setup --non-interactive --accept-risk --mode local 2>&1 || true
+fi
+
+# --allow-unconfigured lets the gateway start on first boot, before the
+# auto-config script has had a chance to write gateway.mode=local.  Once
+# setup-lemonade.js (or the user) has written a config it becomes a no-op.
+exec "$SNAP/bin/node" "$OPENCLAW_MJS" gateway --allow-unconfigured

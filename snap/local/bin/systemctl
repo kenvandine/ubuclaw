@@ -1,0 +1,100 @@
+#!/bin/sh
+# systemctl shim — translates a subset of `systemctl --user` commands into
+# dbus-send calls against the session bus.  OpenClaw uses this to manage
+# skill background services; the snap cannot exec the host's /usr/bin/systemctl
+# directly due to AppArmor strict confinement.
+#
+# Supported: start, stop, restart, enable, disable, is-active, is-enabled,
+#            status (exit-code only), daemon-reload.
+# Unsupported flags are silently ignored so openclaw doesn't abort on --user.
+
+DBUS="$SNAP/usr/bin/dbus-send"
+DEST="org.freedesktop.systemd1"
+OBJ="/org/freedesktop/systemd1"
+MGR="org.freedesktop.systemd1.Manager"
+
+# Strip --user / --system / --no-block flags; we always target the user session.
+args=""
+for arg in "$@"; do
+  case "$arg" in
+    --user|--system|--no-block|--now|--quiet|-q) ;;
+    *) args="$args $arg" ;;
+  esac
+done
+set -- $args
+
+cmd="$1"; shift
+
+dbus_call() {
+  "$DBUS" --session --dest="$DEST" "$OBJ" "$@"
+}
+
+unit_object() {
+  # Returns the D-Bus object path for a unit (needed for property queries).
+  "$DBUS" --session --print-reply --dest="$DEST" "$OBJ" \
+    "${MGR}.GetUnit" "string:$1" 2>/dev/null \
+    | awk '/object path/ { gsub(/"/, "", $3); print $3 }'
+}
+
+get_prop() {
+  local obj="$1" iface="$2" prop="$3"
+  "$DBUS" --session --print-reply --dest="$DEST" "$obj" \
+    org.freedesktop.DBus.Properties.Get "string:$iface" "string:$prop" 2>/dev/null \
+    | awk '/variant/ { print $NF }' | tr -d '"'
+}
+
+check_unit() {
+  case "$1" in
+    ubuclaw-*|snap.ubuclaw.*) ;;
+    *) echo "systemctl shim: refusing to manage unit '$1' (only ubuclaw units are allowed)" >&2
+       exit 1 ;;
+  esac
+}
+
+case "$cmd" in
+  start)
+    check_unit "$1"
+    dbus_call "${MGR}.StartUnit" "string:$1" "string:replace" > /dev/null ;;
+  stop)
+    check_unit "$1"
+    dbus_call "${MGR}.StopUnit" "string:$1" "string:replace" > /dev/null ;;
+  restart)
+    check_unit "$1"
+    dbus_call "${MGR}.RestartUnit" "string:$1" "string:replace" > /dev/null ;;
+  enable)
+    check_unit "$1"
+    dbus_call "${MGR}.EnableUnitFiles" \
+      "array:string:$1" "boolean:false" "boolean:true" > /dev/null
+    dbus_call "${MGR}.Reload" > /dev/null ;;
+  disable)
+    check_unit "$1"
+    dbus_call "${MGR}.DisableUnitFiles" \
+      "array:string:$1" "boolean:false" > /dev/null
+    dbus_call "${MGR}.Reload" > /dev/null ;;
+  daemon-reload)
+    dbus_call "${MGR}.Reload" > /dev/null ;;
+  is-active)
+    check_unit "$1"
+    obj=$(unit_object "$1")
+    [ -z "$obj" ] && exit 3
+    state=$(get_prop "$obj" "org.freedesktop.systemd1.Unit" "ActiveState")
+    [ "$state" = "active" ] ;;
+  is-enabled)
+    check_unit "$1"
+    obj=$(unit_object "$1")
+    [ -z "$obj" ] && exit 1
+    state=$(get_prop "$obj" "org.freedesktop.systemd1.Unit" "UnitFileState")
+    [ "$state" = "enabled" ] ;;
+  status)
+    check_unit "$1"
+    obj=$(unit_object "$1")
+    [ -z "$obj" ] && { echo "Unit $1 not found."; exit 4; }
+    active=$(get_prop "$obj" "org.freedesktop.systemd1.Unit" "ActiveState")
+    sub=$(get_prop    "$obj" "org.freedesktop.systemd1.Unit" "SubState")
+    echo "● $1"
+    echo "   Active: $active ($sub)"
+    [ "$active" = "active" ] ;;
+  *)
+    echo "systemctl shim: unsupported command '$cmd'" >&2
+    exit 1 ;;
+esac
